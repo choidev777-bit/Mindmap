@@ -9,6 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@liveblocks/client": "^3.21.0",
+    "@liveblocks/node": "^3.21.0",
+    "@liveblocks/react": "^3.21.0",
+    "@liveblocks/yjs": "^3.21.0",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.108.2",
     "@xyflow/react": "^12.11.1",
@@ -16,6 +20,7 @@
     "next": "16.2.9",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "yjs": "^13.6.31",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

@@ -1,41 +1,54 @@
 "use client";
 
 /**
- * 마인드맵 편집 상태 + 순수 연산 모듈 (Week 2 / LENS: editing-state).
+ * 마인드맵 편집 상태 + 순수 연산 모듈 (실시간 협업 / Yjs write-through).
  *
  * 핵심 설계(프로젝트 규칙): 트리 구조(parentId, order)만 진실의 원천.
  * 화면 좌표(x,y)는 d3-hierarchy로 파생 계산하므로 여기 상태에는 없다.
  *
- * 상태는 정규화된 Record<string, MindNode> 로 들고,
- * 모든 구조 변경은 "새 nodes 객체를 반환/커밋"하는 불변(immutable) 방식이다.
- * (Yjs로 옮기기 쉽도록 부수효과/좌표 없이 순수 트리 연산만 둔다.)
+ * 실시간 모델(Week 4):
+ *  - 진실의 원천 = 바인딩된 Y.Doc 안 Y.Map<id, MindNode>(src/lib/yjs/bind.ts).
+ *  - store.nodes/rootId/rev 는 Y.Map 의 "로컬 미러" — observer 가 갱신한다.
+ *  - 구조 변경 액션은 doc.transact 안에서 Y.Map 을 수정한다(모든 클라이언트로 전파).
+ *    Yjs observer 가 동기적으로 미러를 갱신하므로 로컬 응답도 즉시 반영된다.
+ *  - selectedId / editingId 는 **공유하지 않는 사용자별 로컬 상태**.
+ *  - doc 미바인딩 시 구조 액션은 no-op(가드).
  */
 
 import { create } from "zustand";
+import type { Doc as YDoc } from "yjs";
 import type { MindNode } from "@/lib/types";
+import { getNodesMap, readNodes, type NodesMap } from "@/lib/yjs/bind";
 
 /* ------------------------------------------------------------------ */
 /* 타입                                                                */
 /* ------------------------------------------------------------------ */
 
 export interface MindmapState {
-  /** 정규화된 노드 맵 */
+  /** 정규화된 노드 맵 (Y.Map 미러) */
   nodes: Record<string, MindNode>;
   /** 루트 노드 id (parentId === null 인 노드). 비어있으면 "" */
   rootId: string;
-  /** 현재 선택된 노드 id (없으면 null) */
+  /** 현재 선택된 노드 id (없으면 null) — 로컬 전용 */
   selectedId: string | null;
-  /** 인라인 편집 중인 노드 id (없으면 null) — 키보드 단축키 NO-OP 게이트 */
+  /** 인라인 편집 중인 노드 id (없으면 null) — 로컬 전용, 키보드 단축키 게이트 */
   editingId: string | null;
-  /** 마지막 구조 변경 리비전. 리레이아웃/오토세이브 트리거용 단조 증가 카운터 */
+  /** 마지막 변경 리비전. 리레이아웃/오토세이브 트리거용 단조 증가 카운터 */
   rev: number;
+
+  /** 바인딩된 Y.Doc(없으면 null) — 비구독 ref */
+  doc: YDoc | null;
+  /** 노드 Y.Map(없으면 null) — 비구독 ref */
+  ymap: NodesMap | null;
+  /** observer 해제 함수(내부용) */
+  _unobserve: (() => void) | null;
 }
 
 export interface MindmapActions {
-  /** 서버에서 불러온 플랫 노드 배열로 상태 교체 */
-  load: (list: MindNode[]) => void;
-  /** 빈 맵을 단일 루트 토픽으로 시드. 반환: 루트 id */
-  seedRoot: (title: string) => string;
+  /** Y.Doc 을 바인딩하고 Y.Map → 미러 observer 를 등록. 캔버스 마운트 시 1회. */
+  bindDoc: (doc: YDoc) => void;
+  /** 바인딩 해제(observer 제거 + 미러 비움). 언마운트 시. */
+  unbindDoc: () => void;
 
   /** 자식 추가 → 새 노드 선택 + 편집 진입. 반환: 새 노드 id */
   addChild: (parentId: string) => string | null;
@@ -174,51 +187,61 @@ export const useMindmap = create<MindmapStore>((set, get) => ({
   selectedId: null,
   editingId: null,
   rev: 0,
+  doc: null,
+  ymap: null,
+  _unobserve: null,
 
-  load: (list) => {
-    const nodes = toRecord(list);
+  bindDoc: (doc) => {
+    // 이전 바인딩이 있으면 정리(맵 간 이동 시).
+    get()._unobserve?.();
+
+    const ymap = getNodesMap(doc);
+    // Y.Map 변경(로컬/원격) → 미러 갱신. 노드를 통째 set/delete 하므로 얕은 observe 로 충분.
+    const sync = () => {
+      const nodes = readNodes(ymap);
+      set({ nodes, rootId: findRootId(nodes), rev: get().rev + 1 });
+    };
+    ymap.observe(sync);
+
     set({
-      nodes,
-      rootId: findRootId(nodes),
-      selectedId: null,
-      editingId: null,
-      rev: get().rev + 1,
+      doc,
+      ymap,
+      _unobserve: () => ymap.unobserve(sync),
     });
+    sync(); // 현재 상태 즉시 미러링
   },
 
-  seedRoot: (title) => {
-    const root = makeNode(null, 0);
-    root.title = title.trim() || "Central Topic";
+  unbindDoc: () => {
+    get()._unobserve?.();
     set({
-      nodes: { [root.id]: root },
-      rootId: root.id,
-      selectedId: root.id,
+      doc: null,
+      ymap: null,
+      _unobserve: null,
+      nodes: {},
+      rootId: "",
+      selectedId: null,
       editingId: null,
-      rev: get().rev + 1,
     });
-    return root.id;
   },
 
   addChild: (parentId) => {
-    const { nodes } = get();
+    const { nodes, ymap, doc } = get();
+    if (!ymap || !doc) return null;
     if (!nodes[parentId]) return null;
     const node = makeNode(parentId, nextOrder(nodes, parentId));
-    set({
+    doc.transact(() => {
       // 부모가 접혀 있었다면 새 자식이 보이도록 펼친다
-      nodes: {
-        ...nodes,
-        [parentId]: { ...nodes[parentId], collapsed: false },
-        [node.id]: node,
-      },
-      selectedId: node.id,
-      editingId: node.id, // 추가 즉시 인라인 편집 진입
-      rev: get().rev + 1,
+      ymap.set(parentId, { ...nodes[parentId], collapsed: false });
+      ymap.set(node.id, node);
     });
+    // 추가 즉시 인라인 편집 진입(로컬 상태)
+    set({ selectedId: node.id, editingId: node.id });
     return node.id;
   },
 
   addSibling: (siblingId) => {
-    const { nodes } = get();
+    const { nodes, ymap, doc } = get();
+    if (!ymap || !doc) return null;
     const sib = nodes[siblingId];
     if (!sib) return null;
     // 루트에는 형제를 만들 수 없다 → 자식으로 폴백
@@ -226,46 +249,45 @@ export const useMindmap = create<MindmapStore>((set, get) => ({
 
     const parentId = sib.parentId;
     const node = makeNode(parentId, nextOrder(nodes, parentId));
-    set({
-      nodes: { ...nodes, [node.id]: node },
-      selectedId: node.id,
-      editingId: node.id,
-      rev: get().rev + 1,
+    doc.transact(() => {
+      ymap.set(node.id, node);
     });
+    set({ selectedId: node.id, editingId: node.id });
     return node.id;
   },
 
   rename: (id, title) => {
-    const { nodes } = get();
-    if (!nodes[id]) return;
-    set({
-      nodes: { ...nodes, [id]: { ...nodes[id], title } },
-      rev: get().rev + 1,
+    const { nodes, ymap, doc } = get();
+    if (!ymap || !doc) return;
+    const node = nodes[id];
+    if (!node) return;
+    doc.transact(() => {
+      ymap.set(id, { ...node, title });
     });
   },
 
   remove: (id) => {
-    const { nodes, rootId } = get();
+    const { nodes, rootId, ymap, doc } = get();
+    if (!ymap || !doc) return;
     const target = nodes[id];
     if (!target) return;
     if (id === rootId || target.parentId === null) return; // 루트는 삭제 금지
 
     const doomed = collectSubtree(nodes, id); // 자기 + 자손
-    const next: Record<string, MindNode> = {};
-    for (const n of Object.values(nodes)) {
-      if (!doomed.has(n.id)) next[n.id] = n;
-    }
     const parentId = target.parentId;
+    doc.transact(() => {
+      for (const did of doomed) ymap.delete(did);
+    });
+    // 부모 재선택(로컬). 미러는 observer 가 이미 갱신함.
     set({
-      nodes: next,
-      selectedId: next[parentId] ? parentId : rootId, // 부모 재선택
+      selectedId: get().nodes[parentId] ? parentId : rootId,
       editingId: null,
-      rev: get().rev + 1,
     });
   },
 
   reparent: (childId, newParentId) => {
-    const { nodes } = get();
+    const { nodes, ymap, doc } = get();
+    if (!ymap || !doc) return false;
     const child = nodes[childId];
     const newParent = nodes[newParentId];
     if (!child || !newParent) return false;
@@ -276,41 +298,37 @@ export const useMindmap = create<MindmapStore>((set, get) => ({
     // 사이클 가드: newParent 가 child 자신 또는 child 의 자손이면 거부
     if (isSelfOrDescendant(nodes, childId, newParentId)) return false;
 
-    set({
-      nodes: {
-        ...nodes,
-        [childId]: {
-          ...child,
-          parentId: newParentId,
-          order: nextOrder(nodes, newParentId), // 새 부모 끝에 붙임
-        },
-        // 새 부모가 접혀 있었으면 펼쳐서 옮긴 노드가 보이게
-        [newParentId]: { ...newParent, collapsed: false },
-      },
-      rev: get().rev + 1,
+    doc.transact(() => {
+      ymap.set(childId, {
+        ...child,
+        parentId: newParentId,
+        order: nextOrder(nodes, newParentId), // 새 부모 끝에 붙임
+      });
+      // 새 부모가 접혀 있었으면 펼쳐서 옮긴 노드가 보이게
+      ymap.set(newParentId, { ...newParent, collapsed: false });
     });
     return true;
   },
 
   toggleCollapse: (id) => {
-    const { nodes } = get();
+    const { nodes, ymap, doc } = get();
+    if (!ymap || !doc) return;
     const n = nodes[id];
     if (!n) return;
     // 자식이 없으면 토글 의미 없음
     if (childrenOf(nodes, id).length === 0) return;
-    set({
-      nodes: { ...nodes, [id]: { ...n, collapsed: !n.collapsed } },
-      rev: get().rev + 1,
+    doc.transact(() => {
+      ymap.set(id, { ...n, collapsed: !n.collapsed });
     });
   },
 
   setSide: (id, side) => {
-    const { nodes } = get();
+    const { nodes, ymap, doc } = get();
+    if (!ymap || !doc) return;
     const n = nodes[id];
     if (!n || n.side === side) return;
-    set({
-      nodes: { ...nodes, [id]: { ...n, side } },
-      rev: get().rev + 1,
+    doc.transact(() => {
+      ymap.set(id, { ...n, side });
     });
   },
 
@@ -325,7 +343,7 @@ export const useMindmap = create<MindmapStore>((set, get) => ({
   },
 
   commitEdit: (title) => {
-    const { editingId, nodes } = get();
+    const { editingId, nodes, ymap, doc } = get();
     if (!editingId) return;
     const node = nodes[editingId];
     if (!node) {
@@ -335,16 +353,15 @@ export const useMindmap = create<MindmapStore>((set, get) => ({
     const trimmed = title.trim();
     // 빈 제목이면 기존 값 유지(새 노드의 경우 placeholder가 남음).
     const finalTitle = trimmed.length > 0 ? trimmed : node.title;
-    // 변경이 없으면 rev 증가 없이 편집만 종료(불필요한 재저장/깜빡임 방지).
-    if (finalTitle === node.title) {
+    // 변경이 없으면 편집만 종료(불필요한 재저장/깜빡임 방지).
+    if (finalTitle === node.title || !ymap || !doc) {
       set({ editingId: null });
       return;
     }
-    set({
-      nodes: { ...nodes, [editingId]: { ...node, title: finalTitle } },
-      editingId: null,
-      rev: get().rev + 1,
+    doc.transact(() => {
+      ymap.set(editingId, { ...node, title: finalTitle });
     });
+    set({ editingId: null });
   },
 
   cancelEdit: () => {

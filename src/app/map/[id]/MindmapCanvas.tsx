@@ -1,22 +1,22 @@
 "use client";
 
 /**
- * Week 2 마인드맵 에디터 캔버스.
+ * 마인드맵 에디터 캔버스 (실시간 협업 / Yjs + Liveblocks).
  *
  * 구성:
- *  - 진실의 원천: zustand 스토어(src/lib/store/mindmap-store.ts)의 정규화 MindNode 맵.
- *    좌표(x,y)는 저장하지 않고 layout 으로 매번 파생 계산.
+ *  - 진실의 원천(실시간): 바인딩된 Liveblocks 룸의 Y.Doc 안 Y.Map<id, MindNode>.
+ *    store(mindmap-store)는 그 로컬 미러이고, 좌표(x,y)는 저장하지 않고 layout 으로 파생.
  *  - 레이아웃: layoutMindmap(평면 노드, rootId) → 좌/우 균형 수평 마인드맵.
  *  - 커스텀 노드: TopicNode (handles + 인라인 편집 + collapse 토글).
  *  - 키보드: Tab=자식, Enter=형제, F2=편집, Delete/Backspace=서브트리 삭제, Escape=선택해제.
- *    편집 중에는 캔버스 단축키 NO-OP(스토어 핸들러가 게이트).
- *  - 드래그-드롭 재부모화: onNodeDragStop + getIntersectingNodes, 사이클 가드는 스토어가 처리.
- *  - 영속화: rev 변경마다 디바운스 자동저장(useAutosave). 로드는 서버 컴포넌트가 내려준
- *    initialNodes 로 시드/복원.
+ *  - 드래그-드롭 재부모화: onNodeDragStop + 중심점 히트테스트, 사이클 가드는 스토어가 처리.
+ *  - 실시간: useRoom → getYjsProviderForRoom → Y.Doc 을 store 에 bindDoc.
+ *    sync 완료 시 seedIfEmpty 로 최초 1회 시드(기존 노드 복원 또는 루트 생성).
+ *  - 영속화: 변경(rev)마다 디바운스로 평면 nodes 를 Supabase 에 미러 저장(useAutosave).
+ *  - 프레즌스: 포인터 이동을 flow 좌표로 변환해 presence.cursor 갱신 → 타인은 <Cursors/> 로 표시.
  *
- * 무한 루프 방지: rfNodes/rfEdges 는 nodes+selectedId+editingId 로부터 useMemo 파생.
- *   onNodesChange 에서 좌표/치수 변화는 스토어에 반영하지 않는다(파생값이므로).
- *   nodeTypes 는 모듈 스코프 고정 참조.
+ * 무한 루프 방지: 로컬 쓰기는 doc.transact 로 묶고, Y.Map observer 가 미러만 갱신(단방향).
+ *   rfNodes/rfEdges 는 nodes+selectedId+editingId 로부터 useMemo 파생. nodeTypes 는 모듈 스코프 고정.
  */
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
@@ -35,6 +35,8 @@ import {
   type OnNodeDrag,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { useRoom, useUpdateMyPresence } from "@liveblocks/react";
+import { getYjsProviderForRoom } from "@liveblocks/yjs";
 
 import type { MindNode } from "@/lib/types";
 import { layoutMindmap, type TopicNode as TopicNodeType } from "@/lib/layout";
@@ -43,8 +45,10 @@ import {
   toList,
   createKeydownHandler,
 } from "@/lib/store/mindmap-store";
+import { getNodesMap, seedIfEmpty } from "@/lib/yjs/bind";
 import { useAutosave } from "@/lib/useAutosave";
 import { TopicNode, topicCallbacks } from "./TopicNode";
+import { Cursors } from "./Cursors";
 
 /* 모듈 스코프 고정 참조(무한 업데이트/플리커 방지). */
 const nodeTypes: NodeTypes = { topic: TopicNode };
@@ -62,6 +66,12 @@ function Flow({
   initialUpdatedAt: string | null;
 }) {
   const rf = useReactFlow<TopicNodeType, Edge>();
+  const room = useRoom();
+  const updateMyPresence = useUpdateMyPresence();
+
+  // ── Yjs provider/doc (룸당 캐시됨) ──────────────────────────
+  const provider = useMemo(() => getYjsProviderForRoom(room), [room]);
+  const doc = useMemo(() => provider.getYDoc(), [provider]);
 
   // ── 스토어 구독 ─────────────────────────────────────────────
   const nodes = useMindmap((s) => s.nodes);
@@ -77,38 +87,53 @@ function Flow({
   const toggleCollapse = useMindmap((s) => s.toggleCollapse);
   const setSide = useMindmap((s) => s.setSide);
   const reparent = useMindmap((s) => s.reparent);
-  const load = useMindmap((s) => s.load);
-  const seedRoot = useMindmap((s) => s.seedRoot);
+  const bindDoc = useMindmap((s) => s.bindDoc);
+  const unbindDoc = useMindmap((s) => s.unbindDoc);
 
   const { status, schedule, flush } = useAutosave({ mapId, initialUpdatedAt });
 
-  // ── 자동저장: 구조 변경(rev) 마다 ──────────────────────────
-  // load/seed 가 bump 한 초기 rev 를 baseline 으로 잡아, 마운트 직후 불필요한 재저장을 막는다.
+  // ── 실시간 바인딩 + 최초 시드 (마운트 1회) ──────────────────
+  // sync 가 baseline 을 잡기 전까진 저장하지 않도록 didInit 로 게이트.
+  const didInit = useRef(false);
   const lastSavedRev = useRef(-1);
 
-  // ── 로드/시드 (마운트 1회) ─────────────────────────────────
-  const didInit = useRef(false);
   useEffect(() => {
-    if (didInit.current) return;
-    didInit.current = true;
-    if (initialNodes && initialNodes.length > 0) {
-      load(initialNodes);
-      // 막 로드한 노드를 곧바로 되저장하지 않도록 baseline 동기화.
-      lastSavedRev.current = useMindmap.getState().rev;
-    } else {
-      // 빈 맵: 루트 1개 시드 후 최초 1회 저장(서버 nodes 가 null 이었으므로).
-      seedRoot(title);
-      lastSavedRev.current = useMindmap.getState().rev;
-      schedule(toList(useMindmap.getState().nodes));
-    }
-    // 초기 뷰 맞춤.
-    requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 0 }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    bindDoc(doc);
 
+    const onSync = (isSynced: boolean) => {
+      if (!isSynced || didInit.current) return;
+      didInit.current = true;
+
+      const ymap = getNodesMap(doc);
+      // 시드 전에 "브랜드 뉴" 여부 판정(원격에도 없고 서버 복원 노드도 없음).
+      const brandNew = ymap.size === 0 && !(initialNodes && initialNodes.length);
+
+      seedIfEmpty(ymap, initialNodes, mapId, title);
+
+      // 막 시드/복원한 상태를 곧바로 되저장하지 않도록 baseline 동기화.
+      lastSavedRev.current = useMindmap.getState().rev;
+      // 새 맵이면 생성된 루트를 Supabase 미러에도 1회 영속화.
+      if (brandNew) schedule(toList(useMindmap.getState().nodes));
+
+      requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 0 }));
+    };
+
+    if (provider.synced) onSync(true);
+    provider.on("sync", onSync);
+
+    return () => {
+      provider.off("sync", onSync);
+      unbindDoc();
+      didInit.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, provider]);
+
+  // ── 자동저장: 변경(rev) 마다 디바운스 미러 저장 ──────────────
+  // 로컬/원격 모두 동일 수렴 상태를 저장 → 중복은 동일 데이터(무해).
   useEffect(() => {
     if (!didInit.current) return;
-    if (rev === lastSavedRev.current) return; // 구조 변경 없음(또는 마운트 baseline)
+    if (rev === lastSavedRev.current) return;
     lastSavedRev.current = rev;
     schedule(toList(useMindmap.getState().nodes));
   }, [rev, schedule]);
@@ -127,9 +152,6 @@ function Flow({
   }, [flush]);
 
   // ── TopicNode 콜백 주입(effect 에서 최신값으로 갱신) ──────────
-  // data 에 함수를 넣으면 노드 identity 가 매 렌더 바뀌므로, 모듈 ref 로 전달한다.
-  // 모듈 객체 변경은 렌더 중이 아니라 effect 안에서 수행(React 19 immutability 규칙 준수).
-  // 편집 상태(editing)는 콜백이 아니므로 노드 data 로 전달한다(아래 rfNodes 참고).
   useEffect(() => {
     topicCallbacks.onToggleCollapse = toggleCollapse;
     topicCallbacks.onCommitTitle = (_id, t) => commitEdit(t);
@@ -138,7 +160,6 @@ function Flow({
 
   // ── 중심 토픽(루트) 제목 → 문서 제목 동기화 ──────────────────
   // 루트 노드 이름을 바꾸면 헤더/최근목록/공유에 쓰이는 documents.title 도 갱신한다.
-  // (rename_map RPC, ~800ms 디바운스. useAutosave 와 동일하게 raw fetch 로 호출.)
   const rootTitle = useMindmap((s) =>
     s.rootId ? s.nodes[s.rootId]?.title : undefined,
   );
@@ -147,7 +168,7 @@ function Flow({
   useEffect(() => {
     if (!didInit.current || rootTitle == null) return;
     if (lastTitle.current === null) {
-      lastTitle.current = rootTitle; // 마운트 직후 기준점(불필요한 저장 방지)
+      lastTitle.current = rootTitle; // 기준점(불필요한 저장 방지)
       return;
     }
     if (rootTitle === lastTitle.current) return;
@@ -209,7 +230,6 @@ function Flow({
   );
 
   // ── 드래그-드롭 재부모화 ───────────────────────────────────
-  // 드래그 시작 좌표(이동 거리 게이트용 — 사소한 클릭/미세 드래그로 인한 오재부모화 방지).
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const onNodeDragStart = useCallback<OnNodeDrag<TopicNodeType>>((_e, node) => {
     dragStart.current = { x: node.position.x, y: node.position.y };
@@ -229,7 +249,6 @@ function Flow({
         const cx = dragged.position.x;
         const cy = dragged.position.y;
         // 드롭 "중심점"이 실제로 어떤 노드 안에 들어있을 때만 그 노드를 대상으로 삼는다.
-        // (넓은 바운딩박스 겹침이 아님 → 옆 노드에 잘못 합쳐지는 문제 방지)
         const target = rf.getNodes().find((h) => {
           if (h.id === dragged.id || h.id === currentParent) return false;
           const w = h.width ?? h.measured?.width ?? 160;
@@ -240,15 +259,11 @@ function Flow({
           );
         });
         if (target) {
-          // 노드 "위"에 정확히 드롭 → 그 노드의 자식으로 재부모화(서브트리 동반).
           reparent(dragged.id, target.id);
         } else if (currentParent === st.rootId) {
-          // 빈 공간에 드롭한 루트 직계 브랜치 → 드롭한 쪽(좌/우)으로 전환(별개 브랜치 유지).
-          // 루트는 원점(x=0)이므로 드롭 x 부호로 좌/우 판정. 자손은 layout 이 따라감.
           setSide(dragged.id, cx >= 0 ? "right" : "left");
         }
       }
-      // 파생 레이아웃이 노드를 제자리로 스냅 → 뷰 재맞춤.
       requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 200 }));
     },
     [rf, reparent, setSide],
@@ -258,9 +273,6 @@ function Flow({
   useEffect(() => {
     const handler = createKeydownHandler();
     const onKey = (e: KeyboardEvent) => {
-      // 인터랙티브 요소(입력창·버튼·링크·셀렉트·편집영역)에 포커스가 있으면
-      // 캔버스 단축키를 발동하지 않는다 — 헤더 링크/공유 버튼/컨트롤 버튼 등에서
-      // Delete·Enter 가 노드를 삭제/생성하는 사고를 막는다.
       const el = e.target as HTMLElement | null;
       if (
         el?.closest(
@@ -274,6 +286,18 @@ function Flow({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, []);
+
+  // ── 프레즌스: 포인터를 flow 좌표로 변환해 커서 공유 ──────────
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const p = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      updateMyPresence({ cursor: { x: p.x, y: p.y } });
+    },
+    [rf, updateMyPresence],
+  );
+  const onPointerLeave = useCallback(() => {
+    updateMyPresence({ cursor: null });
+  }, [updateMyPresence]);
 
   // ── 자동 정렬(이미 자동 레이아웃이지만 뷰 재맞춤) ──────────
   const autoArrange = useCallback(() => {
@@ -311,6 +335,8 @@ function Flow({
         setSelected(null);
         cancelEdit();
       }}
+      onPointerMove={onPointerMove}
+      onPointerLeave={onPointerLeave}
       nodesConnectable={false}
       nodesDraggable
       deleteKeyCode={null} // Delete 는 우리가 직접 처리
@@ -321,6 +347,7 @@ function Flow({
       <Background gap={20} />
       <Controls showInteractive={false} />
       <MiniMap pannable zoomable />
+      <Cursors />
       <Panel position="top-right">
         <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white/90 px-3 py-1.5 text-xs shadow-sm backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/90">
           <button
