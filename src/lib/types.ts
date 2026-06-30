@@ -18,6 +18,14 @@ export interface MapMeta {
   updated_at: string;
 }
 
+/** get_map_full RPC 반환행 (메타 + 평면 노드). nodes 가 null 이면 빈 맵. */
+export interface MapFull {
+  id: string;
+  title: string;
+  nodes: MindNode[] | null;
+  updated_at: string;
+}
+
 /**
  * 마인드맵 토픽 노드.
  * 핵심 설계: 트리 구조(parentId, order)만 진실의 원천으로 저장한다.
