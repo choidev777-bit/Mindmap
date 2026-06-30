@@ -75,6 +75,7 @@ function Flow({
   const commitEdit = useMindmap((s) => s.commitEdit);
   const cancelEdit = useMindmap((s) => s.cancelEdit);
   const toggleCollapse = useMindmap((s) => s.toggleCollapse);
+  const setSide = useMindmap((s) => s.setSide);
   const reparent = useMindmap((s) => s.reparent);
   const load = useMindmap((s) => s.load);
   const seedRoot = useMindmap((s) => s.seedRoot);
@@ -223,19 +224,26 @@ function Flow({
         : 0;
       // 30px 미만 이동은 재부모화로 취급하지 않는다.
       if (moved >= 30) {
-        const currentParent =
-          useMindmap.getState().nodes[dragged.id]?.parentId ?? null;
+        const st = useMindmap.getState();
+        const currentParent = st.nodes[dragged.id]?.parentId ?? null;
         const hits = rf.getIntersectingNodes(dragged, true);
         // 자기 자신·현재 부모는 후보에서 제외. 사이클/루트 가드는 스토어가 처리.
         const target = hits.find(
           (h) => h.id !== dragged.id && h.id !== currentParent,
         );
-        if (target) reparent(dragged.id, target.id);
+        if (target) {
+          // 다른 노드 위에 드롭 → 그 노드의 자식으로 재부모화(서브트리 동반).
+          reparent(dragged.id, target.id);
+        } else if (currentParent === st.rootId) {
+          // 루트 직계 브랜치를 빈 공간에 드롭 → 드롭한 쪽(좌/우)으로 전환.
+          // 루트는 원점(x=0)이므로 드롭 x 부호로 좌/우 판정. 자손은 layout 이 따라감.
+          setSide(dragged.id, dragged.position.x >= 0 ? "right" : "left");
+        }
       }
       // 파생 레이아웃이 노드를 제자리로 스냅 → 뷰 재맞춤.
       requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 200 }));
     },
-    [rf, reparent],
+    [rf, reparent, setSide],
   );
 
   // ── 전역 키보드(선택 기반, 편집 중엔 스토어 핸들러가 NO-OP) ─

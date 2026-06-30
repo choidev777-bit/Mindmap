@@ -52,6 +52,8 @@ export interface MindmapActions {
   reparent: (childId: string, newParentId: string) => boolean;
 
   toggleCollapse: (id: string) => void;
+  /** 루트 직계 브랜치의 좌/우 측을 지정(드래그로 측 전환). 자손은 layout 이 따라가게 함. */
+  setSide: (id: string, side: "left" | "right") => void;
   setSelected: (id: string | null) => void;
 
   beginEdit: (id: string) => void;
@@ -298,6 +300,16 @@ export const useMindmap = create<MindmapStore>((set, get) => ({
     if (childrenOf(nodes, id).length === 0) return;
     set({
       nodes: { ...nodes, [id]: { ...n, collapsed: !n.collapsed } },
+      rev: get().rev + 1,
+    });
+  },
+
+  setSide: (id, side) => {
+    const { nodes } = get();
+    const n = nodes[id];
+    if (!n || n.side === side) return;
+    set({
+      nodes: { ...nodes, [id]: { ...n, side } },
       rev: get().rev + 1,
     });
   },
