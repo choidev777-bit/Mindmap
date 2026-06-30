@@ -33,9 +33,6 @@ export default async function MapPage({
         </Link>
         <MapTitle initialTitle={doc.title} />
         <div className="ml-auto flex items-center gap-2">
-          <span className="hidden rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700 sm:inline dark:bg-blue-950 dark:text-blue-300">
-            Week 2: 편집
-          </span>
           <ShareButton />
         </div>
       </header>
