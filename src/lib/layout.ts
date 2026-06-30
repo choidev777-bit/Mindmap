@@ -31,10 +31,46 @@ const H_GAP = 64;
 /** 인접 노드 가장자리 사이 수직 여백. */
 const V_PAD = 22;
 
-/** 노드 실측 크기(없으면 기본값으로 폴백). */
+/** 노드 크기. */
 export interface NodeSize {
   width: number;
   height: number;
+}
+
+const MIN_W = 88;
+const MAX_W = 300;
+const LINE_H = 20;
+const HPAD = 24; // 좌우 패딩(px-3 * 2)
+const VPAD = 16; // 상하 패딩(py-2 * 2)
+
+/**
+ * 텍스트 길이로 노드 크기를 추정한다.
+ * 고정값 대신 추정값을 width/height 로 지정하면 가변 크기(길면 넓어지고 줄바꿈)를
+ * 유지하면서도 모든 노드가 명시적 크기를 가져 React Flow 가 즉시 렌더(숨김 없음)된다
+ * → 새 노드 포커스/표시가 안정적이고, 측정 피드백 루프가 필요 없다.
+ */
+function estimateSize(title: string, hasChildren: boolean): NodeSize {
+  const text = title && title.trim() ? title.trim() : "제목 없음";
+  let textW = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code >= 0x1100)
+      textW += 15; // 한글/CJK/전각
+    else if (ch === " ") textW += 4;
+    else textW += 8; // ASCII
+  }
+  const ctrl = hasChildren ? 26 : 0; // 접기 버튼 + 간격
+  const full = HPAD + ctrl + textW;
+  if (full <= MAX_W) {
+    return { width: Math.max(MIN_W, Math.round(full)), height: NODE_HEIGHT };
+  }
+  // 최대 폭 초과 → 줄바꿈. 줄 수만큼 높이 증가.
+  const contentW = MAX_W - HPAD - ctrl;
+  const lines = Math.max(1, Math.ceil(textW / contentW));
+  return {
+    width: MAX_W,
+    height: Math.max(NODE_HEIGHT, VPAD + lines * LINE_H + 8),
+  };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -277,10 +313,7 @@ function collectSideSubset(
 export function layoutMindmap(
   allNodes: MindNode[],
   rootId: string,
-  sizes?: Map<string, NodeSize>,
 ): LayoutResult {
-  const sizeOf = (id: string): NodeSize =>
-    sizes?.get(id) ?? { width: NODE_WIDTH, height: NODE_HEIGHT };
   const positions = new Map<string, { x: number; y: number }>();
   const byId = new Map(allNodes.map((n) => [n.id, n]));
   const rootNode = byId.get(rootId);
@@ -290,6 +323,17 @@ export function layoutMindmap(
   }
 
   const byParent = indexChildren(allNodes);
+
+  // 텍스트 길이로 노드 크기 추정 → 명시적 width/height 로 지정(가변 + 즉시 렌더).
+  const sizeMap = new Map<string, NodeSize>();
+  for (const n of allNodes) {
+    sizeMap.set(
+      n.id,
+      estimateSize(n.title, (byParent.get(n.id)?.length ?? 0) > 0),
+    );
+  }
+  const sizeOf = (id: string): NodeSize =>
+    sizeMap.get(id) ?? { width: NODE_WIDTH, height: NODE_HEIGHT };
 
   // 1) 접힘 경계까지 보이는 노드 집합.
   const visible = collectVisible(rootId, byParent, byId);
@@ -388,7 +432,8 @@ export function layoutMindmap(
       sourcePosition,
       targetPosition,
       draggable: !isRoot ? true : false,
-      // width/height 미지정 → React Flow 가 실제 콘텐츠 크기를 측정(가변 크기).
+      width: sizeOf(n.id).width,
+      height: sizeOf(n.id).height,
     } satisfies TopicNode;
   });
 

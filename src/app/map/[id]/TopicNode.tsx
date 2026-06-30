@@ -48,14 +48,29 @@ function TopicNodeImpl({ id, data, selected }: NodeProps<TopicNodeType>) {
   // (제어 컴포넌트 + effect-setState 의 cascading-render 안티패턴을 피한다.)
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 편집 진입 시 포커스/전체선택.
+  // 편집 진입 시 입력창 포커스.
+  // 새 노드는 React Flow 가 "측정 전"이라 한 틱 동안 visibility:hidden 으로 렌더되어
+  // 그 사이엔 focus 가 먹지 않는다 → 보일 때까지 rAF 로 재시도(최대 ~20프레임) 후 전체선택.
   useEffect(() => {
-    if (editing) {
-      requestAnimationFrame(() => {
-        inputRef.current?.focus();
+    if (!editing) return;
+    let raf = 0;
+    let tries = 0;
+    const focusNow = () => {
+      const el = inputRef.current;
+      if (el && document.activeElement !== el) el.focus({ preventScroll: true });
+      if (
+        inputRef.current &&
+        document.activeElement !== inputRef.current &&
+        tries < 20
+      ) {
+        tries += 1;
+        raf = requestAnimationFrame(focusNow);
+      } else {
         inputRef.current?.select();
-      });
-    }
+      }
+    };
+    raf = requestAnimationFrame(focusNow);
+    return () => cancelAnimationFrame(raf);
   }, [editing]);
 
   const commit = () =>
@@ -67,9 +82,8 @@ function TopicNodeImpl({ id, data, selected }: NodeProps<TopicNodeType>) {
 
   return (
     <div
-      style={{ maxWidth: 320 }}
       className={[
-        "group relative inline-flex min-w-[84px] items-center gap-1.5 rounded-xl border px-3 py-2 text-sm shadow-sm transition-colors",
+        "group relative flex h-full w-full items-center gap-1.5 rounded-xl border px-3 py-2 text-sm shadow-sm transition-colors",
         isRoot
           ? "bg-blue-600 font-semibold text-white"
           : "bg-white text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100",
@@ -129,8 +143,9 @@ function TopicNodeImpl({ id, data, selected }: NodeProps<TopicNodeType>) {
           key={`edit-${id}`}
           ref={inputRef}
           defaultValue={title}
+          autoFocus
           // React Flow 의 드래그/팬/전역 키 처리를 막는다.
-          className="nodrag nopan w-[200px] max-w-[260px] bg-transparent outline-none placeholder:text-zinc-400"
+          className="nodrag nopan min-w-0 flex-1 bg-transparent outline-none placeholder:text-zinc-400"
           placeholder="토픽 입력…"
           onMouseDown={(e) => e.stopPropagation()}
           onKeyDown={(e) => {
@@ -146,7 +161,7 @@ function TopicNodeImpl({ id, data, selected }: NodeProps<TopicNodeType>) {
           onBlur={commit}
         />
       ) : (
-        <span className="min-w-0 whitespace-normal break-words">
+        <span className="min-w-0 flex-1 whitespace-normal break-words">
           {title || (
             <span className={isRoot ? "text-blue-200" : "text-zinc-400"}>
               제목 없음

@@ -19,7 +19,7 @@
  *   nodeTypes 는 모듈 스코프 고정 참조.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -37,11 +37,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import type { MindNode } from "@/lib/types";
-import {
-  layoutMindmap,
-  type TopicNode as TopicNodeType,
-  type NodeSize,
-} from "@/lib/layout";
+import { layoutMindmap, type TopicNode as TopicNodeType } from "@/lib/layout";
 import {
   useMindmap,
   toList,
@@ -66,10 +62,6 @@ function Flow({
   initialUpdatedAt: string | null;
 }) {
   const rf = useReactFlow<TopicNodeType, Edge>();
-
-  // 노드 실측 크기(가변 너비/높이). React Flow 측정값을 모아 레이아웃에 반영한다.
-  const sizesRef = useRef<Map<string, NodeSize>>(new Map());
-  const [sizeTick, setSizeTick] = useState(0);
 
   // ── 스토어 구독 ─────────────────────────────────────────────
   const nodes = useMindmap((s) => s.nodes);
@@ -185,8 +177,8 @@ function Flow({
   // ── 레이아웃 파생(평면 노드 + rootId) ──────────────────────
   const flat = useMemo(() => toList(nodes), [nodes]);
   const { nodes: laidNodes, edges: laidEdges } = useMemo(
-    () => layoutMindmap(flat, rootId, sizesRef.current),
-    [flat, rootId, sizeTick],
+    () => layoutMindmap(flat, rootId),
+    [flat, rootId],
   );
 
   // 선택/편집 상태를 RF 노드에 반영(레이아웃은 selection/editing 을 모름).
@@ -208,23 +200,9 @@ function Flow({
   // ── 컨트롤드 변경: 선택만 반영, 좌표/치수는 무시(파생값) ───
   const onNodesChange = useCallback<OnNodesChange<TopicNodeType>>(
     (changes) => {
-      let sizeChanged = false;
       for (const c of changes) {
-        if (c.type === "select") {
-          setSelected(c.selected ? c.id : null);
-        } else if (c.type === "dimensions" && c.dimensions) {
-          // React Flow 가 측정한 실제 노드 크기를 모은다(가변 크기 레이아웃용).
-          const w = Math.round(c.dimensions.width);
-          const h = Math.round(c.dimensions.height);
-          const prev = sizesRef.current.get(c.id);
-          if (!prev || prev.width !== w || prev.height !== h) {
-            sizesRef.current.set(c.id, { width: w, height: h });
-            sizeChanged = true;
-          }
-        }
+        if (c.type === "select") setSelected(c.selected ? c.id : null);
       }
-      // 실측 크기가 바뀐 경우에만 재레이아웃(무한 루프 방지: 크기 변화 없으면 no-op).
-      if (sizeChanged) setSizeTick((t) => t + 1);
     },
     [setSelected],
   );
