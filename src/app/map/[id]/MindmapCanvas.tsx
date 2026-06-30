@@ -226,18 +226,26 @@ function Flow({
       if (moved >= 30) {
         const st = useMindmap.getState();
         const currentParent = st.nodes[dragged.id]?.parentId ?? null;
-        const hits = rf.getIntersectingNodes(dragged, true);
-        // 자기 자신·현재 부모는 후보에서 제외. 사이클/루트 가드는 스토어가 처리.
-        const target = hits.find(
-          (h) => h.id !== dragged.id && h.id !== currentParent,
-        );
+        const cx = dragged.position.x;
+        const cy = dragged.position.y;
+        // 드롭 "중심점"이 실제로 어떤 노드 안에 들어있을 때만 그 노드를 대상으로 삼는다.
+        // (넓은 바운딩박스 겹침이 아님 → 옆 노드에 잘못 합쳐지는 문제 방지)
+        const target = rf.getNodes().find((h) => {
+          if (h.id === dragged.id || h.id === currentParent) return false;
+          const w = h.width ?? h.measured?.width ?? 160;
+          const hh = h.height ?? h.measured?.height ?? 40;
+          return (
+            Math.abs(cx - h.position.x) <= w / 2 &&
+            Math.abs(cy - h.position.y) <= hh / 2
+          );
+        });
         if (target) {
-          // 다른 노드 위에 드롭 → 그 노드의 자식으로 재부모화(서브트리 동반).
+          // 노드 "위"에 정확히 드롭 → 그 노드의 자식으로 재부모화(서브트리 동반).
           reparent(dragged.id, target.id);
         } else if (currentParent === st.rootId) {
-          // 루트 직계 브랜치를 빈 공간에 드롭 → 드롭한 쪽(좌/우)으로 전환.
+          // 빈 공간에 드롭한 루트 직계 브랜치 → 드롭한 쪽(좌/우)으로 전환(별개 브랜치 유지).
           // 루트는 원점(x=0)이므로 드롭 x 부호로 좌/우 판정. 자손은 layout 이 따라감.
-          setSide(dragged.id, dragged.position.x >= 0 ? "right" : "left");
+          setSide(dragged.id, cx >= 0 ? "right" : "left");
         }
       }
       // 파생 레이아웃이 노드를 제자리로 스냅 → 뷰 재맞춤.
