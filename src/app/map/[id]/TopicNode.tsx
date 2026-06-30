@@ -18,7 +18,6 @@
 import { memo, useEffect, useRef } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { TopicNode as TopicNodeType } from "@/lib/layout";
-import { NODE_WIDTH, NODE_HEIGHT } from "@/lib/layout";
 
 /**
  * MindmapCanvas 가 nodeTypes 로 등록할 때 노드 콜백들을 주입하기 위한 컨텍스트.
@@ -68,9 +67,9 @@ function TopicNodeImpl({ id, data, selected }: NodeProps<TopicNodeType>) {
 
   return (
     <div
-      style={{ width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
+      style={{ maxWidth: 320 }}
       className={[
-        "group relative flex items-center gap-1.5 rounded-xl border px-3 py-2 text-sm shadow-sm transition-colors",
+        "group relative inline-flex min-w-[84px] items-center gap-1.5 rounded-xl border px-3 py-2 text-sm shadow-sm transition-colors",
         isRoot
           ? "bg-blue-600 font-semibold text-white"
           : "bg-white text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100",
@@ -131,7 +130,7 @@ function TopicNodeImpl({ id, data, selected }: NodeProps<TopicNodeType>) {
           ref={inputRef}
           defaultValue={title}
           // React Flow 의 드래그/팬/전역 키 처리를 막는다.
-          className="nodrag nopan w-full min-w-0 flex-1 bg-transparent outline-none placeholder:text-zinc-400"
+          className="nodrag nopan w-[200px] max-w-[260px] bg-transparent outline-none placeholder:text-zinc-400"
           placeholder="토픽 입력…"
           onMouseDown={(e) => e.stopPropagation()}
           onKeyDown={(e) => {
@@ -147,7 +146,7 @@ function TopicNodeImpl({ id, data, selected }: NodeProps<TopicNodeType>) {
           onBlur={commit}
         />
       ) : (
-        <span className="min-w-0 flex-1 truncate">
+        <span className="min-w-0 whitespace-normal break-words">
           {title || (
             <span className={isRoot ? "text-blue-200" : "text-zinc-400"}>
               제목 없음

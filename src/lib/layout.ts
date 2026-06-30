@@ -22,13 +22,20 @@ import type { MindNode } from "./types";
 /* ────────────────────────────────────────────────────────────────────────── */
 /* 상수 — 고정 노드 크기(가변 폭/높이는 이 상수로 근사). 커스텀 노드 CSS와 일치시킬 것. */
 
-export const NODE_WIDTH = 180;
-export const NODE_HEIGHT = 44;
+// 측정 전 기본 크기(폴백). 실제 크기는 캔버스가 측정해 sizes 로 전달한다.
+export const NODE_WIDTH = 172;
+export const NODE_HEIGHT = 40;
 
-/** 형제 간 수직 간격(노드 높이 포함). d3 nodeSize의 첫 번째 값. */
-const V_GAP = NODE_HEIGHT + 24; // 68
-/** 깊이(레벨) 간 수평 간격(노드 폭 포함). d3 nodeSize의 두 번째 값. */
-const H_GAP = NODE_WIDTH + 80; // 260
+/** 부모 가장자리 ~ 자식 가장자리 사이 수평 간격(레벨 간격). */
+const H_GAP = 64;
+/** 인접 노드 가장자리 사이 수직 여백. */
+const V_PAD = 22;
+
+/** 노드 실측 크기(없으면 기본값으로 폴백). */
+export interface NodeSize {
+  width: number;
+  height: number;
+}
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* 공개 타입 */
@@ -124,6 +131,7 @@ function collectVisible(
 function layoutSide(
   subset: MindNode[],
   rootId: string,
+  sizeOf: (id: string) => NodeSize,
 ): HierarchyNode<Strat> & { x: number; y: number } {
   const data: Strat[] = subset.map((n) => ({
     id: n.id,
@@ -143,11 +151,16 @@ function layoutSide(
       (a.data.id < b.data.id ? -1 : 1),
   );
 
-  // nodeSize: [수직(형제 간), 수평(레벨 간)]. 화면축은 호출부에서 스왑.
-  // separation: 다른 부모를 둔 인접 노드는 한 칸 더 띄움 → 서브트리 겹침 방지.
+  // 수직(형제 축)만 d3로 계산. nodeSize[0]=1 이면 separation 반환값이 곧 픽셀 간격.
+  // 실제 노드 높이를 반영해 가변 높이에서도 세로 겹침이 없게 한다.
+  // 수평 좌표(.y)는 호출부에서 실제 너비 누적으로 다시 계산하므로 여기선 1.
   const layout = tree<Strat>()
-    .nodeSize([V_GAP, H_GAP])
-    .separation((a, b) => (a.parent === b.parent ? 1 : 1.25));
+    .nodeSize([1, 1])
+    .separation((a, b) => {
+      const ha = sizeOf(a.data.id).height;
+      const hb = sizeOf(b.data.id).height;
+      return (ha / 2 + hb / 2 + V_PAD) * (a.parent === b.parent ? 1 : 1.4);
+    });
 
   return layout(root) as HierarchyNode<Strat> & { x: number; y: number };
 }
@@ -264,7 +277,10 @@ function collectSideSubset(
 export function layoutMindmap(
   allNodes: MindNode[],
   rootId: string,
+  sizes?: Map<string, NodeSize>,
 ): LayoutResult {
+  const sizeOf = (id: string): NodeSize =>
+    sizes?.get(id) ?? { width: NODE_WIDTH, height: NODE_HEIGHT };
   const positions = new Map<string, { x: number; y: number }>();
   const byId = new Map(allNodes.map((n) => [n.id, n]));
   const rootNode = byId.get(rootId);
@@ -287,28 +303,37 @@ export function layoutMindmap(
   //    화면축 매핑: screenX = ±hpNode.y, screenY = hpNode.x.
   positions.set(rootId, { x: 0, y: 0 });
 
-  if (right.length > 0) {
-    const subset = collectSideSubset(rootNode, right, byParent, visibleIds);
-    const laid = layoutSide(subset, rootId);
-    const rootHX = laid.x; // 루트를 y=0에 맞추기 위한 오프셋.
-    laid.each((hp) => {
-      const h = hp as HierarchyNode<Strat> & { x: number; y: number };
-      if (h.data.id === rootId) return;
-      positions.set(h.data.id, { x: h.y, y: h.x - rootHX });
-    });
-  }
+  // 각 측을 d3 tree로 레이아웃하고 좌표 병합(루트=원점).
+  //  - 수직(screenY): d3 breadth(.x) 사용(높이 반영 separation).
+  //  - 수평(screenX): 실제 너비 누적으로 직접 계산 → 가변 너비에서도 겹침 없음.
+  const placeSide = (sideRoots: MindNode[], sign: 1 | -1) => {
+    if (sideRoots.length === 0) return;
+    const subset = collectSideSubset(rootNode, sideRoots, byParent, visibleIds);
+    const laid = layoutSide(subset, rootId, sizeOf);
+    const rootHX = laid.x; // 루트를 screenY=0에 맞추는 오프셋.
 
-  if (left.length > 0) {
-    const subset = collectSideSubset(rootNode, left, byParent, visibleIds);
-    const laid = layoutSide(subset, rootId);
-    const rootHX = laid.x;
+    // 부모→자식 순(eachBefore)으로 수평 좌표 누적: 가장자리 + 간격.
+    const sx = new Map<string, number>([[rootId, 0]]);
+    laid.eachBefore((hp) => {
+      const h = hp as HierarchyNode<Strat> & { x: number; y: number };
+      if (h.data.id === rootId || !h.parent) return;
+      const parentId = h.parent.data.id;
+      const pw = sizeOf(parentId).width;
+      const w = sizeOf(h.data.id).width;
+      sx.set(
+        h.data.id,
+        (sx.get(parentId) ?? 0) + sign * (pw / 2 + H_GAP + w / 2),
+      );
+    });
+
     laid.each((hp) => {
       const h = hp as HierarchyNode<Strat> & { x: number; y: number };
       if (h.data.id === rootId) return;
-      // x를 음수로 미러링 → 왼쪽으로 확장.
-      positions.set(h.data.id, { x: -h.y, y: h.x - rootHX });
+      positions.set(h.data.id, { x: sx.get(h.data.id) ?? 0, y: h.x - rootHX });
     });
-  }
+  };
+  placeSide(right, 1);
+  placeSide(left, -1);
 
   // 4) 각 노드의 side 결정(핸들/엣지 방향용).
   const sideOf = new Map<string, "left" | "right" | "root">();
@@ -363,8 +388,7 @@ export function layoutMindmap(
       sourcePosition,
       targetPosition,
       draggable: !isRoot ? true : false,
-      width: NODE_WIDTH,
-      height: NODE_HEIGHT,
+      // width/height 미지정 → React Flow 가 실제 콘텐츠 크기를 측정(가변 크기).
     } satisfies TopicNode;
   });
 
