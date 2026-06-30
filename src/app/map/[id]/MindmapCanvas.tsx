@@ -135,6 +135,45 @@ function Flow({
     topicCallbacks.onCancelEdit = cancelEdit;
   }, [toggleCollapse, commitEdit, cancelEdit]);
 
+  // ── 중심 토픽(루트) 제목 → 문서 제목 동기화 ──────────────────
+  // 루트 노드 이름을 바꾸면 헤더/최근목록/공유에 쓰이는 documents.title 도 갱신한다.
+  // (rename_map RPC, ~800ms 디바운스. useAutosave 와 동일하게 raw fetch 로 호출.)
+  const rootTitle = useMindmap((s) =>
+    s.rootId ? s.nodes[s.rootId]?.title : undefined,
+  );
+  const titleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTitle = useRef<string | null>(null);
+  useEffect(() => {
+    if (!didInit.current || rootTitle == null) return;
+    if (lastTitle.current === null) {
+      lastTitle.current = rootTitle; // 마운트 직후 기준점(불필요한 저장 방지)
+      return;
+    }
+    if (rootTitle === lastTitle.current) return;
+    lastTitle.current = rootTitle;
+    if (titleTimer.current) clearTimeout(titleTimer.current);
+    titleTimer.current = setTimeout(() => {
+      const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      if (!url || !anon) return;
+      void fetch(`${url}/rest/v1/rpc/rename_map`, {
+        method: "POST",
+        headers: {
+          apikey: anon,
+          Authorization: `Bearer ${anon}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          p_id: mapId,
+          p_title: rootTitle.trim() || "제목 없는 마인드맵",
+        }),
+      });
+    }, 800);
+    return () => {
+      if (titleTimer.current) clearTimeout(titleTimer.current);
+    };
+  }, [rootTitle, mapId]);
+
   // ── 레이아웃 파생(평면 노드 + rootId) ──────────────────────
   const flat = useMemo(() => toList(nodes), [nodes]);
   const { nodes: laidNodes, edges: laidEdges } = useMemo(
